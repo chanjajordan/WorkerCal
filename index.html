@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<!--
+  OctoCRM — Worker Job Calendar (READ-ONLY)
+  Standalone companion. Same Firebase DB (octoCRM_v4) as the rest.
+  Shows ALL of one worker's jobs (every status) on a calendar.
+  - Read-only: no create/edit/delete, no modal, no shared/other-CRM events.
+  - Reads techs[] + jobs[] only. Never writes anything.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>OctoCRM — My Jobs</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --input:#11141a;
+    --bdr:#2a2f3a; --t1:#eef1f6; --t2:#aeb6c4; --t3:#6b7384;
+    --ac:#19c3b2; --pu:#7c6cff; --ok:#33c27f; --wn:#f0a93b; --er:#e5544b;
+    --wa:#25d366; --r:10px; --fs-sm:13px; --fs-xs:11px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--t1);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.4}
+  a{color:var(--ac)}
+  header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#171a21,#13161c);border-bottom:1px solid var(--bdr);padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;font-weight:800;letter-spacing:.2px}
+  header h1 .dot{color:var(--ac)}
+  .sync{font-size:var(--fs-xs);color:var(--t3);display:flex;align-items:center;gap:6px;margin-left:auto}
+  .sync .led{width:8px;height:8px;border-radius:50%;background:var(--t3)}
+  .sync.on .led{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .sync.err .led{background:var(--er)}
+  .wrap{max-width:980px;margin:0 auto;padding:16px}
+
+  /* Worker summary */
+  .wkr{background:var(--panel);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px;display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+  .ava{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;color:#04211e;background:var(--ac);flex:none}
+  .wkr .meta{display:flex;flex-direction:column;gap:2px}
+  .wkr .meta b{font-size:16px}
+  .wkr .meta span{font-size:var(--fs-sm);color:var(--t2)}
+  .pill{font-size:var(--fs-xs);font-weight:700;padding:4px 10px;border-radius:99px;border:1px solid var(--bdr)}
+  .pill.ok{color:var(--ok);border-color:#1f4030;background:#11241b}
+  .pill.busy{color:var(--wn);border-color:#46391c;background:#241d10}
+  .wkr .right{margin-left:auto;display:flex;gap:8px}
+
+  /* Calendar */
+  .cal{background:var(--panel);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden}
+  .cal-h{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--bdr)}
+  .cal-h b{font-size:16px}
+  .cal-h .nav{margin-left:auto;display:flex;gap:6px}
+  .nbtn{width:40px;height:40px;border-radius:8px;border:1px solid var(--bdr);background:var(--panel2);color:var(--t1);font-size:18px;cursor:pointer}
+  .nbtn:hover{border-color:var(--ac)}
+  .dow{display:grid;grid-template-columns:repeat(7,1fr);background:var(--panel2)}
+  .dow span{text-align:center;font-size:var(--fs-xs);color:var(--t3);padding:8px 0;font-weight:700;text-transform:uppercase}
+  .grid{display:grid;grid-template-columns:repeat(7,1fr)}
+  .cell{height:96px;border-right:1px solid var(--bdr);border-bottom:1px solid var(--bdr);padding:5px;position:relative;cursor:pointer;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+  .cell:nth-child(7n){border-right:none}
+  .cell.pad{background:#12141a;cursor:default}
+  .cell:not(.pad):hover{background:var(--panel2)}
+  .cell .dn{font-size:12px;color:var(--t2);font-weight:600;align-self:flex-end}
+  .cell.today .dn{background:var(--ac);color:#04211e;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center}
+  .cell.sel{box-shadow:inset 0 0 0 2px var(--ac)}
+  .ev{font-size:11px;line-height:1.3;padding:2px 5px;border-radius:5px;background:var(--panel2);border-left:3px solid var(--ac);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:100%}
+  .ev.s-Open{border-left-color:var(--pu)}
+  .ev.s-Assigned{border-left-color:var(--ac)}
+  .ev.s-In-Progress{border-left-color:var(--wn)}
+  .ev.s-Completed{border-left-color:var(--ok);opacity:.7}
+  .ev.ext{border-left-color:var(--pu);border-left-style:dashed;background:#1a1726;color:var(--t2)}
+  .more{font-size:10px;color:var(--t3);padding-left:4px}
+
+  /* Day list */
+  .day{margin-top:14px;background:#252b38;border:1px solid #3a4150;border-radius:14px;padding:14px}
+  .day:empty{display:none}
+  .day h3{font-size:14px;margin:0 0 10px;color:var(--t1)}
+  .jc{background:#30374a;border:1px solid #434b5d;border-left:3px solid var(--ac);border-radius:var(--r);padding:12px 14px;margin-bottom:10px}
+  .jc.s-Open{border-left-color:var(--pu)} .jc.s-Assigned{border-left-color:var(--ac)}
+  .jc.s-In-Progress{border-left-color:var(--wn)} .jc.s-Completed{border-left-color:var(--ok)}
+  .jc.ext{border-left-color:var(--pu);border-left-style:dashed;background:#2c2740}
+  .jc-top{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+  .jc-top b{font-size:15px;color:#fff}
+  .jc-meta{font-size:var(--fs-sm);color:#cdd4e0;margin-top:5px;display:flex;flex-wrap:wrap;gap:4px 14px}
+  .bd{font-size:var(--fs-xs);font-weight:700;padding:3px 9px;border-radius:99px;border:1px solid #525a6c;white-space:nowrap}
+  .bd.Open{color:var(--pu)} .bd.Assigned{color:var(--ac)} .bd.In-Progress{color:var(--wn)} .bd.Completed{color:var(--ok)}
+  .es{text-align:center;color:#aeb6c4;padding:22px;font-size:var(--fs-sm)}
+
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--bdr);border-left:3px solid var(--ac);color:var(--t1);padding:12px 18px;border-radius:10px;font-size:14px;z-index:80;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;max-width:90vw}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(-4px)}
+  .toast.error{border-left-color:var(--er)} .toast.success{border-left-color:var(--ok)}
+  @media(max-width:560px){
+    .cell{height:78px} .cell .dn{font-size:11px}
+    .ev{font-size:10px;padding:2px 4px}
+    .wrap{padding:12px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Octo<span class="dot">·</span>Jobs <span style="color:var(--t3);font-weight:600;font-size:14px">— Sriram</span></h1>
+  <div class="sync" id="sync"><span class="led"></span><span id="syncTxt">Connecting…</span></div>
+</header>
+
+<div class="wrap">
+  <div id="wkrBox"></div>
+
+  <div class="cal">
+    <div class="cal-h">
+      <b id="calTitle">—</b>
+      <div class="nav">
+        <button class="nbtn" onclick="moveMonth(-1)" aria-label="Previous">‹</button>
+        <button class="nbtn" onclick="goToday()" title="Today" style="width:auto;padding:0 12px;font-size:13px;font-weight:700">Today</button>
+        <button class="nbtn" onclick="moveMonth(1)" aria-label="Next">›</button>
+      </div>
+    </div>
+    <div class="dow"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <div class="day" id="dayBox"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------- shared Firebase config (same project as OctoCRM) ---------- */
+const FB_CFG={apiKey:"AIzaSyCSQAS7mFBlTfmz0FVWaSLgI-Puk1Y3sN4",authDomain:"octocrm1.firebaseapp.com",databaseURL:"https://octocrm1-default-rtdb.asia-southeast1.firebasedatabase.app",projectId:"octocrm1",storageBucket:"octocrm1.firebasestorage.app",messagingSenderId:"212247591529",appId:"1:212247591529:web:4a076e40a71b59646b00f8"};
+const FB_PATH='octoCRM_v4';
+
+/* Cross-CRM shared calendar (same node AmwayCRM publishes to). Read-only here:
+   we never publish, just read every OTHER tag's events (incl. Amway). */
+const SHARED_NODE='sharedFieldServiceCal_v1';
+const MY_TAG='octopack';                // our own block — skip it when reading
+let _sharedEvents=[];                    // incoming events from OTHER tags (Amway etc.)
+
+let fbDB=null, DB={techs:[],jobs:[]};
+const WORKER_NAME='Sriram';  // this view is locked to one worker
+let curWorker=null;          // resolved Sriram tech id, or null until DB loads
+let viewY, viewM;            // calendar month being shown
+let selDate=null;            // 'YYYY-MM-DD' clicked day
+
+/* ---------- helpers ---------- */
+const E=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=id=>document.getElementById(id);
+const pad=n=>String(n).padStart(2,'0');
+const ymd=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const todayStr=()=>ymd(new Date());
+const MON=['January','February','March','April','May','June','July','August','September','October','November','December'];
+function initials(name){return (name||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();}
+function jobTechIds(j){const a=Array.isArray(j.techIds)?j.techIds.slice():[];if(j.techId!=null&&!a.includes(j.techId))a.push(j.techId);return a;}
+function jobsFor(worker){let js=DB.jobs||[];if(worker!=null)js=js.filter(j=>jobTechIds(j).includes(worker));return js;}
+function statusCls(s){return 's-'+String(s||'Assigned').replace(/\s+/g,'-');}
+function bdCls(s){return String(s||'Assigned').replace(/\s+/g,'-');}
+function toast(msg,kind=''){const t=$('toast');t.className='toast on '+kind;t.textContent=msg;clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',2600);}
+
+/* ---------- Firebase (READ-ONLY) ---------- */
+function setSync(state,txt){const el=$('sync');el.className='sync '+state;$('syncTxt').textContent=txt;}
+function initFB(){
+  try{
+    if(!firebase.apps.length)firebase.initializeApp(FB_CFG);
+    fbDB=firebase.database();
+    fbDB.ref(FB_PATH).on('value',s=>{
+      const v=s.val()||{};
+      DB.techs=Array.isArray(v.techs)?v.techs:[];
+      DB.jobs=Array.isArray(v.jobs)?v.jobs:[];
+      setSync('on','Live');
+      renderWorkers(); render();
+    },err=>{setSync('err','Offline');toast('Firebase error: '+err.message,'error');});
+    // Read every OTHER CRM's events (incl. Amway) from the shared node — read-only
+    fbDB.ref(SHARED_NODE).on('value',s=>{
+      const d=s.val()||{};const out=[];
+      Object.keys(d).forEach(k=>{
+        if(k===MY_TAG)return;          // skip our own block
+        const block=d[k];if(!block||!block.events)return;
+        const evs=Array.isArray(block.events)?block.events:Object.values(block.events);
+        out.push(...evs);
+      });
+      _sharedEvents=out;
+      render();
+    });
+  }catch(e){setSync('err','Error');toast('Init failed: '+e.message,'error');}
+}
+
+/* ---------- worker (locked to Sriram) ---------- */
+function resolveWorker(){
+  const t=DB.techs.find(x=>new RegExp(WORKER_NAME,'i').test(x.name||''));
+  curWorker=t?t.id:null;
+  return t;
+}
+function renderWorkers(){resolveWorker();renderWorkerBox();}
+function renderWorkerBox(){
+  const box=$('wkrBox');
+  const t=DB.techs.find(x=>x.id===curWorker);
+  if(!t){box.innerHTML=`<div class="wkr"><div class="ava">?</div><div class="meta"><b>${E(WORKER_NAME)} not found</b><span>Add a technician named “${E(WORKER_NAME)}” in OctoCRM first.</span></div></div>`;return;}
+  const all=jobsFor(curWorker);
+  const active=all.filter(j=>j.status!=='Completed'&&j.status!=='Cancelled').length;
+  box.innerHTML=`<div class="wkr">
+    <div class="ava">${E(initials(t.name))}</div>
+    <div class="meta"><b>${E(t.name)}</b><span>${E(t.spec||'General')} · ${all.length} job${all.length===1?'':'s'} total</span></div>
+    <span class="pill ${active?'busy':'ok'}">${active?active+' active':'All clear'}</span>
+  </div>`;
+}
+
+/* ---------- calendar ---------- */
+function moveMonth(d){viewM+=d;if(viewM<0){viewM=11;viewY--;}if(viewM>11){viewM=0;viewY++;}render();}
+function goToday(){const n=new Date();viewY=n.getFullYear();viewM=n.getMonth();selDate=todayStr();render();}
+function render(){
+  $('calTitle').textContent=`${MON[viewM]} ${viewY}`;
+  const first=new Date(viewY,viewM,1);
+  let lead=(first.getDay()+6)%7;                       // make Monday=0
+  const dim=new Date(viewY,viewM+1,0).getDate();
+  const tStr=todayStr();
+  const byDay={};
+  jobsFor(curWorker).forEach(j=>{if(j.date){(byDay[j.date]=byDay[j.date]||[]).push(j);}});
+  const extByDay={};
+  _sharedEvents.forEach(e=>{if(e.date){(extByDay[e.date]=extByDay[e.date]||[]).push(e);}});
+  let cells='';
+  for(let i=0;i<lead;i++)cells+='<div class="cell pad"></div>';
+  for(let d=1;d<=dim;d++){
+    const ds=`${viewY}-${pad(viewM+1)}-${pad(d)}`;
+    const evs=(byDay[ds]||[]).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const ext=(extByDay[ds]||[]).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const cap=2;
+    const mine=evs.slice(0,cap).map(j=>`<div class="ev ${statusCls(j.status)}" title="${j.time?E(j.time)+' ':''}${E(j.title||'(untitled)')}">${E(j.title||'(untitled)')}</div>`).join('');
+    const room=Math.max(0,cap-evs.length);
+    const extShown=ext.slice(0,room).map(e=>`<div class="ev ext" title="🔗 ${E(e.sourceLabel||'Other CRM')}: ${E(e.title||'')}">🔗 ${E(e.title||'')}</div>`).join('');
+    const extra=Math.max(0,evs.length-cap)+Math.max(0,ext.length-room);
+    const more=extra?`<div class="more">+${extra} more</div>`:'';
+    cells+=`<div class="cell ${ds===tStr?'today':''} ${ds===selDate?'sel':''}" onclick="pickDay('${ds}')">
+      <span class="dn">${d}</span>${mine}${extShown}${more}</div>`;
+  }
+  const total=lead+dim;const trail=(7-total%7)%7;
+  for(let i=0;i<trail;i++)cells+='<div class="cell pad"></div>';
+  $('grid').innerHTML=cells;
+  renderDay();
+}
+function pickDay(ds){selDate=ds;render();}
+function renderDay(){
+  const box=$('dayBox');
+  if(!selDate){box.innerHTML='';return;}
+  const [y,m,d]=selDate.split('-').map(Number);
+  const dateLbl=new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
+  const evs=jobsFor(curWorker).filter(j=>j.date===selDate).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+  const ext=_sharedEvents.filter(e=>e.date===selDate).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+  const totalEv=evs.length+ext.length;
+  let html=`<h3>${E(dateLbl)} · ${totalEv} job${totalEv===1?'':'s'}</h3>`;
+  if(!totalEv){html+='<div class="es">No jobs on this day.</div>';}
+  else html+=evs.map(j=>{
+    return `<div class="jc ${statusCls(j.status)}">
+      <div class="jc-top"><b>${E(j.title||'(untitled)')}</b><span class="bd ${bdCls(j.status)}">${E(j.status||'Assigned')}</span></div>
+      <div class="jc-meta">
+        ${j.time?`<span>🕑 ${E(j.time)}</span>`:''}
+        ${j.customer?`<span>🏢 ${E(j.customer)}</span>`:''}
+        ${j.model||j.machine?`<span>⚙️ ${E(j.model||'')} ${E(j.machine||'')}</span>`:''}
+        ${j.type?`<span>🔧 ${E(j.type)}</span>`:''}
+        ${j.priority?`<span>⚡ ${E(j.priority)}</span>`:''}
+        ${j.address?`<span>📍 ${E(j.address)}</span>`:''}
+      </div>
+      ${j.desc?`<div class="jc-meta" style="color:var(--t3)">${E(j.desc)}</div>`:''}
+    </div>`;
+  }).join('');
+  if(ext.length){
+    html+=`<h3 style="margin-top:18px;color:var(--pu)">🔗 Other CRM jobs · ${ext.length}</h3>`;
+    html+=ext.map(e=>`<div class="jc ext">
+      <div class="jc-top"><b>${E(e.title||'(untitled)')}</b><span class="bd" style="color:var(--pu)">${E(e.sourceLabel||'Other')}</span></div>
+      <div class="jc-meta">
+        ${e.time?`<span>🕑 ${E(e.time)}</span>`:''}
+        ${e.customer?`<span>🏢 ${E(e.customer)}</span>`:''}
+        ${e.techNames?`<span>👷 ${E(e.techNames)}</span>`:''}
+        ${e.type?`<span>🔧 ${E(e.type)}</span>`:''}
+        ${e.status?`<span>📌 ${E(e.status)}</span>`:''}
+      </div>
+    </div>`).join('');
+  }
+  box.innerHTML=html;
+}
+
+/* ---------- boot ---------- */
+(function(){const n=new Date();viewY=n.getFullYear();viewM=n.getMonth();selDate=todayStr();render();})();
+(function loadFB(){
+  const s1=document.createElement('script');
+  s1.src='https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js';
+  s1.onload=()=>{const s2=document.createElement('script');
+    s2.src='https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js';
+    s2.onload=initFB;s2.onerror=()=>setSync('err','SDK failed');document.head.appendChild(s2);};
+  s1.onerror=()=>setSync('err','SDK failed');
+  document.head.appendChild(s1);
+})();
+</script>
+</body>
+</html>
