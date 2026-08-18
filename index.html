@@ -144,7 +144,9 @@ let _bookings=[];                        // Sriram's calendar-only bookings from
 let fbDB=null, DB={techs:[],jobs:[]};
 const WORKER_NAME='Sriram';  // this view is locked to one worker
 const JOB_STATUSES=['Open','Assigned','In Progress','Completed','Cancelled'];
+const BOOKING_STATUSES=['Booked','In Progress','Completed','Cancelled'];
 let _savingJob=null;         // job id currently being written (guard double-tap)
+let _savingBk=null;          // booking id currently being written (guard double-tap)
 let curWorker=null;          // resolved Sriram tech id, or null until DB loads
 let viewY, viewM;            // calendar month being shown
 let selDate=null;            // 'YYYY-MM-DD' clicked day
@@ -279,6 +281,36 @@ function updateJobStatus(id,status){
     .catch(err=>{job.status=prev;toast('Save failed: '+err.message,'error');})
     .finally(()=>{_savingJob=null;render();});
 }
+/* Worker updates a BOOKING's status. Bookings live in the shared node's own
+   octopack block (published by worker-booking). We write via an atomic by-id
+   transaction on octopack/events — never by array index (the block also holds
+   octobk-job-* mirrors, so indexes shift). worker-booking re-reads _myBookings
+   from this same node before it republishes, so the status is preserved, not
+   clobbered. Rolls back the optimistic change on failure. */
+function updateBookingStatus(id,status){
+  if(!BOOKING_STATUSES.includes(status)){toast('Unknown status','error');return;}
+  const i=_bookings.findIndex(b=>b&&String(b.id)===String(id));
+  if(i<0){toast('Booking not found','error');return;}
+  if(!fbDB){toast('Offline — status not saved','error');render();return;}
+  if(_savingBk!=null)return;                  // one write at a time
+  const bk=_bookings[i];
+  const prev=bk.status;
+  if(prev===status)return;                    // no change
+  _savingBk=id;
+  bk.status=status;                           // optimistic
+  render();
+  fbDB.ref(SHARED_NODE+'/'+MY_TAG+'/events').transaction(cur=>{
+    if(!cur)return cur;                        // block gone — abort
+    const apply=o=>{if(o&&String(o.id)===String(id))o.status=status;};
+    if(Array.isArray(cur))cur.forEach(apply); else Object.keys(cur).forEach(k=>apply(cur[k]));
+    return cur;
+  },(err,committed)=>{
+    _savingBk=null;
+    if(err||!committed){bk.status=prev;toast('Save failed'+(err?': '+err.message:''),'error');}
+    else toast('Booking → '+status,'success');
+    render();
+  });
+}
 function renderDay(){
   const box=$('dayBox');
   if(!selDate){box.innerHTML='';return;}
@@ -323,7 +355,12 @@ function renderDay(){
       ${(b.collectionAddress||b.address)?`<div class="jc-meta"><span>📦 Collect: ${E(b.collectionAddress||b.address)}</span></div>`:''}
       ${b.deliveryAddress?`<div class="jc-meta"><span>📍 Deliver: ${E(b.deliveryAddress)}</span></div>`:''}
       ${b.desc?`<div class="jc-meta" style="color:var(--t3)">${E(b.desc)}</div>`:''}
-      <div class="jc-meta" style="color:var(--t3)">Booking — manage in the Worker Booking app</div>
+      <div class="strow">
+        <label>Booking status</label>
+        <select class="stsel" ${_savingBk!=null&&String(_savingBk)===String(b.id)?'disabled':''} onchange="updateBookingStatus('${E(String(b.id))}',this.value)">
+          ${BOOKING_STATUSES.map(s=>`<option value="${E(s)}"${(b.status||'Booked')===s?' selected':''}>${E(s)}</option>`).join('')}
+        </select>
+      </div>
     </div>`).join('');
   if(ext.length){
     html+=`<h3 style="margin-top:18px;color:var(--pu)">🔗 Other CRM jobs · ${ext.length}</h3>`;
