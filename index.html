@@ -1,15 +1,18 @@
 <!DOCTYPE html>
 <!--
-  OctoCRM — Worker Job Calendar (READ-ONLY)
+  OctoCRM — Worker Job Calendar
   Standalone companion. Same Firebase DB (octoCRM_v4) as the rest.
   Shows ALL of one worker's jobs (every status) on a calendar.
-  - Read-only: no create/edit/delete, no modal, no shared/other-CRM events.
-  - Reads techs[] + jobs[] only. Never writes anything.
+  - Worker may UPDATE the status of their OWN jobs (Open/Assigned/In Progress/
+    Completed/Cancelled). Writes ONLY the single field octoCRM_v4/jobs/<idx>/status
+    (never the whole jobs array) so a stale snapshot can't clobber sibling jobs.
+  - Other-CRM (shared calendar) events remain strictly read-only.
+  - No create/delete, no report edits. Reads techs[] + jobs[] + shared node.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>OctoCRM — My Jobs</title>
 <style>
   :root{
@@ -29,7 +32,7 @@
   .sync .led{width:8px;height:8px;border-radius:50%;background:var(--t3)}
   .sync.on .led{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .sync.err .led{background:var(--er)}
-  .wrap{max-width:980px;margin:0 auto;padding:16px}
+  .wrap{max-width:980px;margin:0 auto;padding:16px;padding-bottom:calc(96px + env(safe-area-inset-bottom))}
 
   /* Worker summary */
   .wkr{background:var(--panel);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px;display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap}
@@ -82,13 +85,20 @@
   .bd.Open{color:var(--pu)} .bd.Assigned{color:var(--ac)} .bd.In-Progress{color:var(--wn)} .bd.Completed{color:var(--ok)}
   .es{text-align:center;color:#aeb6c4;padding:22px;font-size:var(--fs-sm)}
 
+  /* Status updater */
+  .strow{margin-top:11px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .strow label{font-size:var(--fs-xs);color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.3px}
+  .stsel{background:var(--input);color:var(--t1);border:1px solid #4a5163;border-radius:8px;padding:8px 10px;font-size:14px;font-weight:600;min-height:40px}
+  .stsel:focus{outline:none;border-color:var(--ac)}
+  .stsel:disabled{opacity:.5}
+
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--bdr);border-left:3px solid var(--ac);color:var(--t1);padding:12px 18px;border-radius:10px;font-size:14px;z-index:80;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;max-width:90vw}
   .toast.on{opacity:1;transform:translateX(-50%) translateY(-4px)}
   .toast.error{border-left-color:var(--er)} .toast.success{border-left-color:var(--ok)}
   @media(max-width:560px){
     .cell{height:78px} .cell .dn{font-size:11px}
     .ev{font-size:10px;padding:2px 4px}
-    .wrap{padding:12px}
+    .wrap{padding:12px;padding-bottom:calc(96px + env(safe-area-inset-bottom))}
   }
 </style>
 </head>
@@ -127,11 +137,14 @@ const FB_PATH='octoCRM_v4';
 /* Cross-CRM shared calendar (same node AmwayCRM publishes to). Read-only here:
    we never publish, just read every OTHER tag's events (incl. Amway). */
 const SHARED_NODE='sharedFieldServiceCal_v1';
-const MY_TAG='octopack';                // our own block — skip it when reading
+const MY_TAG='octopack';                // OctoCRM's shared-cal tag (worker-booking publishes bookings here)
 let _sharedEvents=[];                    // incoming events from OTHER tags (Amway etc.)
+let _bookings=[];                        // Sriram's calendar-only bookings from the octopack block (id 'octobk-bk-*')
 
 let fbDB=null, DB={techs:[],jobs:[]};
 const WORKER_NAME='Sriram';  // this view is locked to one worker
+const JOB_STATUSES=['Open','Assigned','In Progress','Completed','Cancelled'];
+let _savingJob=null;         // job id currently being written (guard double-tap)
 let curWorker=null;          // resolved Sriram tech id, or null until DB loads
 let viewY, viewM;            // calendar month being shown
 let selDate=null;            // 'YYYY-MM-DD' clicked day
@@ -163,14 +176,20 @@ function initFB(){
       setSync('on','Live');
       renderWorkers(); render();
     },err=>{setSync('err','Offline');toast('Firebase error: '+err.message,'error');});
-    // Read every OTHER CRM's events (incl. Amway) from the shared node — read-only
+    // Read the shared node — read-only. OTHER tags (incl. Amway) → _sharedEvents;
+    // our OWN octopack block → the worker's calendar bookings from worker-booking.
     fbDB.ref(SHARED_NODE).on('value',s=>{
       const d=s.val()||{};const out=[];
       Object.keys(d).forEach(k=>{
-        if(k===MY_TAG)return;          // skip our own block
         const block=d[k];if(!block||!block.events)return;
         const evs=Array.isArray(block.events)?block.events:Object.values(block.events);
-        out.push(...evs);
+        if(k===MY_TAG){
+          // Keep the calendar-only bookings (octobk-bk-*); skip the octobk-job-*
+          // mirrors — those duplicate the jobs already shown from DB.jobs.
+          _bookings=evs.filter(e=>e&&String(e.id||'').indexOf('octobk-bk-')===0);
+          return;
+        }
+        out.push(...evs);              // other CRMs (incl. Amway)
       });
       _sharedEvents=out;
       render();
@@ -209,6 +228,8 @@ function render(){
   const tStr=todayStr();
   const byDay={};
   jobsFor(curWorker).forEach(j=>{if(j.date){(byDay[j.date]=byDay[j.date]||[]).push(j);}});
+  const bkByDay={};
+  _bookings.forEach(b=>{if(b.date){(bkByDay[b.date]=bkByDay[b.date]||[]).push(b);}});
   const extByDay={};
   _sharedEvents.forEach(e=>{if(e.date){(extByDay[e.date]=extByDay[e.date]||[]).push(e);}});
   let cells='';
@@ -216,12 +237,16 @@ function render(){
   for(let d=1;d<=dim;d++){
     const ds=`${viewY}-${pad(viewM+1)}-${pad(d)}`;
     const evs=(byDay[ds]||[]).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const bks=(bkByDay[ds]||[]).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
     const ext=(extByDay[ds]||[]).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
     const cap=2;
-    const mine=evs.slice(0,cap).map(j=>`<div class="ev ${statusCls(j.status)}" title="${j.time?E(j.time)+' ':''}${E(j.title||'(untitled)')}">${E(j.title||'(untitled)')}</div>`).join('');
-    const room=Math.max(0,cap-evs.length);
+    // Sriram's jobs + his bookings share the "mine" slots; bookings get a 📌.
+    const mineItems=[...evs.map(j=>({title:j.title,cls:statusCls(j.status),bk:false})),
+                     ...bks.map(b=>({title:b.title,cls:'s-Booked',bk:true}))];
+    const mine=mineItems.slice(0,cap).map(o=>`<div class="ev ${o.cls}" title="${(o.bk?'📌 ':'')+E(o.title||'(untitled)')}">${o.bk?'📌 ':''}${E(o.title||'(untitled)')}</div>`).join('');
+    const room=Math.max(0,cap-mineItems.length);
     const extShown=ext.slice(0,room).map(e=>`<div class="ev ext" title="🔗 ${E(e.sourceLabel||'Other CRM')}: ${E(e.title||'')}">🔗 ${E(e.title||'')}</div>`).join('');
-    const extra=Math.max(0,evs.length-cap)+Math.max(0,ext.length-room);
+    const extra=Math.max(0,mineItems.length-cap)+Math.max(0,ext.length-room);
     const more=extra?`<div class="more">+${extra} more</div>`:'';
     cells+=`<div class="cell ${ds===tStr?'today':''} ${ds===selDate?'sel':''}" onclick="pickDay('${ds}')">
       <span class="dn">${d}</span>${mine}${extShown}${more}</div>`;
@@ -232,17 +257,40 @@ function render(){
   renderDay();
 }
 function pickDay(ds){selDate=ds;render();}
+
+/* Worker updates the status of ONE of their own jobs.
+   Writes ONLY octoCRM_v4/jobs/<idx>/status — never the whole jobs array — so a
+   stale local snapshot can't clobber sibling jobs another user just changed.
+   The RTDB array index == our DB.jobs index because we read jobs as an array. */
+function updateJobStatus(id,status){
+  if(!JOB_STATUSES.includes(status)){toast('Unknown status','error');return;}
+  const idx=DB.jobs.findIndex(j=>j&&String(j.id)===String(id));
+  if(idx<0){toast('Job not found','error');return;}
+  if(!fbDB){toast('Offline — status not saved','error');render();return;}
+  if(_savingJob!=null)return;                 // one write at a time
+  const job=DB.jobs[idx];
+  const prev=job.status;
+  if(prev===status)return;                    // no change
+  _savingJob=id;
+  job.status=status;                          // optimistic
+  render();
+  fbDB.ref(FB_PATH+'/jobs/'+idx+'/status').set(status)
+    .then(()=>{toast('Status → '+status,'success');})
+    .catch(err=>{job.status=prev;toast('Save failed: '+err.message,'error');})
+    .finally(()=>{_savingJob=null;render();});
+}
 function renderDay(){
   const box=$('dayBox');
   if(!selDate){box.innerHTML='';return;}
   const [y,m,d]=selDate.split('-').map(Number);
   const dateLbl=new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
   const evs=jobsFor(curWorker).filter(j=>j.date===selDate).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+  const bks=_bookings.filter(b=>b.date===selDate).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
   const ext=_sharedEvents.filter(e=>e.date===selDate).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
-  const totalEv=evs.length+ext.length;
-  let html=`<h3>${E(dateLbl)} · ${totalEv} job${totalEv===1?'':'s'}</h3>`;
-  if(!totalEv){html+='<div class="es">No jobs on this day.</div>';}
-  else html+=evs.map(j=>{
+  const totalEv=evs.length+bks.length+ext.length;
+  let html=`<h3>${E(dateLbl)} · ${totalEv} item${totalEv===1?'':'s'}</h3>`;
+  if(!totalEv){html+='<div class="es">No jobs or bookings on this day.</div>';}
+  html+=evs.map(j=>{
     return `<div class="jc ${statusCls(j.status)}">
       <div class="jc-top"><b>${E(j.title||'(untitled)')}</b><span class="bd ${bdCls(j.status)}">${E(j.status||'Assigned')}</span></div>
       <div class="jc-meta">
@@ -254,8 +302,29 @@ function renderDay(){
         ${j.address?`<span>📍 ${E(j.address)}</span>`:''}
       </div>
       ${j.desc?`<div class="jc-meta" style="color:var(--t3)">${E(j.desc)}</div>`:''}
+      <div class="strow">
+        <label>Update status</label>
+        <select class="stsel" ${_savingJob!=null&&String(_savingJob)===String(j.id)?'disabled':''} onchange="updateJobStatus('${E(String(j.id))}',this.value)">
+          ${JOB_STATUSES.map(s=>`<option value="${E(s)}"${(j.status||'Assigned')===s?' selected':''}>${E(s)}</option>`).join('')}
+        </select>
+      </div>
     </div>`;
   }).join('');
+  html+=bks.map(b=>`<div class="jc s-Booked">
+      <div class="jc-top"><b>📌 ${E(b.title||'(untitled)')}</b><span class="bd Assigned">Booking</span></div>
+      <div class="jc-meta">
+        ${b.time?`<span>🕑 ${E(b.time)}${b.timeEnd?' – '+E(b.timeEnd):''}</span>`:''}
+        ${b.company?`<span>🏬 ${E(b.company)}</span>`:''}
+        ${b.customer?`<span>🏢 ${E(b.customer)}</span>`:''}
+        ${b.appliance?`<span>⚙️ ${E(b.appliance)}</span>`:''}
+        ${b.type?`<span>🔧 ${E(b.type)}</span>`:''}
+        ${b.priority?`<span>⚡ ${E(b.priority)}</span>`:''}
+      </div>
+      ${(b.collectionAddress||b.address)?`<div class="jc-meta"><span>📦 Collect: ${E(b.collectionAddress||b.address)}</span></div>`:''}
+      ${b.deliveryAddress?`<div class="jc-meta"><span>📍 Deliver: ${E(b.deliveryAddress)}</span></div>`:''}
+      ${b.desc?`<div class="jc-meta" style="color:var(--t3)">${E(b.desc)}</div>`:''}
+      <div class="jc-meta" style="color:var(--t3)">Booking — manage in the Worker Booking app</div>
+    </div>`).join('');
   if(ext.length){
     html+=`<h3 style="margin-top:18px;color:var(--pu)">🔗 Other CRM jobs · ${ext.length}</h3>`;
     html+=ext.map(e=>`<div class="jc ext">
