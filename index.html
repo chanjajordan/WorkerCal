@@ -348,6 +348,7 @@ function renderDay(){
         ${b.time?`<span>🕑 ${E(b.time)}${b.timeEnd?' – '+E(b.timeEnd):''}</span>`:''}
         ${b.company?`<span>🏬 ${E(b.company)}</span>`:''}
         ${b.customer?`<span>🏢 ${E(b.customer)}</span>`:''}
+        ${b.contactNumber?`<span>📞 <a href="tel:${E(String(b.contactNumber).replace(/[^0-9+]/g,''))}" style="color:var(--ac);text-decoration:none">${E(b.contactNumber)}</a></span>`:''}
         ${b.appliance?`<span>⚙️ ${E(b.appliance)}</span>`:''}
         ${b.type?`<span>🔧 ${E(b.type)}</span>`:''}
         ${b.priority?`<span>⚡ ${E(b.priority)}</span>`:''}
